@@ -40,14 +40,28 @@
     <script type="text/javascript" src="./js/crypto-js/crypto-js.min.js"></script>
     
     <script type="module">
-        
+
+        // 导入 P2P Media Loader 核心模块
         import { HlsJsP2PEngine } from "./js/p2p/p2p-media-loader-hlsjs.es.js";
+
+        // m3u8视频地址
+        let m3u8_url = 'https://test-streams.mux.dev/x36xhzz/url_2/193039199_mp4_h264_aac_ld_7.m3u8';
         
         // 创建 ArtPlayer 实例
         const art = new Artplayer({
             container: '.artplayer-app',
-            url: 'https://test-streams.mux.dev/x36xhzz/url_2/193039199_mp4_h264_aac_ld_7.m3u8',
+            id: CryptoJS.MD5(m3u8_url).toString(),
+            url: m3u8_url,
             volume: 0.3,
+            autoplay: false,
+            autoMini: true,
+            hotkey: true,
+            pip: true,
+            fullscreen: true,
+            miniProgressBar: true,
+            lock: true,
+            fastForward: true,
+            autoPlayback: true,
             setting: true,
             flip: true,
             playbackRate: true,
