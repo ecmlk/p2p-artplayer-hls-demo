@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="zh-Hans-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>ArtPlayer HLS P2P Demo</title>
+    
+    <script type="text/javascript" src="./js/hls/hls.js"></script>
+    
+    <script type="text/javascript" src="./js/artplayer/artplayer.js"></script>
+    
+    <style type="text/css">
+        body,html {
+            overflow-x: hidden;
+            overflow-y: hidden;
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+        }
+        .artplayer-app {
+            width: 100%;
+            height: 100%;
+        }
+        #stats {
+            position: fixed;
+            top: 5px;
+            right: 10px;
+            font-size: 12px;
+            color: #fdfdfd;
+            z-index: 2147483647;
+            text-shadow: 1px 1px 1px #000, 1px 1px 1px #000;
+        }
+    </style>
+</head>
+<body>
+    
+    <div class="artplayer-app"></div>
+    <div id="stats"></div>
+    
+    <script type="text/javascript" src="./js/crypto-js/crypto-js.min.js"></script>
+    
+    <script type="module">
+        
+        import { HlsJsP2PEngine } from "./js/p2p/p2p-media-loader-hlsjs.es.js";
+        
+        // 创建 ArtPlayer 实例
+        const art = new Artplayer({
+            container: '.artplayer-app',
+            url: 'https://test-streams.mux.dev/x36xhzz/url_2/193039199_mp4_h264_aac_ld_7.m3u8',
+            volume: 0.5,
+            customType: {
+                m3u8: playM3u8,
+            },
+        });
+
+        // 监听播放事件
+        art.on('play', function() {
+            console.log('开始播放');
+        });
+
+        // 监听暂停事件
+        art.on('pause', function() {
+            console.log('暂停播放');
+        });
+        
+        var _peerId = '',
+            _peerNum = 0,
+            _totalP2PDownloaded = 0,
+            _totalP2PUploaded = 0;
+        
+        function updateStats() {
+            var text = 'P2P正在为您加速' + (_totalP2PDownloaded/(1024*1024)).toFixed(2) + 'MB 已分享' + (_totalP2PUploaded/(1024*1024)).toFixed(2) + 'MB' + ' 连接节点' + _peerNum + '个';
+            document.getElementById('stats').innerText = text
+        }
+        
+        function playM3u8(video, url, art) {
+            
+            const HlsWithP2P = HlsJsP2PEngine.injectMixin(window.Hls);
+            
+            const hls = new HlsWithP2P({
+                p2p: {
+                    core: {
+                        
+                        // 设置 群体ID
+                        swarmId: CryptoJS.MD5(url).toString(),
+                        
+                        // 配置 Tracker 服务器
+                        announceTrackers: [
+                            "wss://tracker.openwebtorrent.com",
+                            "wss://tracker.webtorrent.dev",
+                            "wss://tracker.novage.com.ua"
+                        ],
+                        
+                        /* 配置 STUN 服务器
+                        rtcConfig: {
+                            iceServers: [
+                                { urls: "stun:stun.l.google.com:19302" },
+                                { urls: "stun:global.stun.twilio.com:3478?transport=udp" },
+                            ],
+                        }
+                        */
+                    },
+                    onHlsJsCreated(hls) {
+                        
+                        // 在分段段已完全下载并可供使用时调用。
+                        hls.p2pEngine.addEventListener("onSegmentLoaded", (details) => {
+                            //console.log(details);
+                        });
+                        
+                        // 在下载分段时发生错误时触发。
+                        hls.p2pEngine.addEventListener('onSegmentError', (details) => {
+                            //console.log(details);
+                        });
+                        
+                        // 如果分段的下载在完成之前中止，则调用。
+                        hls.p2pEngine.addEventListener('onSegmentAbort', (details) => {
+                            //console.log(details);
+                        });
+                        
+                        // 在分段下载过程开始时触发。
+                        hls.p2pEngine.addEventListener('onSegmentStart', (details) => {
+                            updateStats();
+                        });
+                        
+                        // 在建立新的对等连接时发生。
+                        hls.p2pEngine.addEventListener('onPeerConnect', (details) => {
+                            _peerNum = _peerNum + 1;
+                            updateStats();
+                        });
+                        
+                        // 在现有对等连接关闭时触发。
+                        hls.p2pEngine.addEventListener('onPeerClose', (details) => {
+                            _peerNum = _peerNum - 0.5;
+                            updateStats();
+                        });
+                        
+                        // 在对等连接期间发生错误时触发
+                        hls.p2pEngine.addEventListener('onPeerError', (details) => {
+                            //console.log(details);
+                        });
+                        
+                        // 在成功下载段中的数据块后调用。
+                        hls.p2pEngine.addEventListener('onChunkDownloaded', (bytesLength, downloadSource, peerId) => {
+                            if (downloadSource == 'p2p' && peerId != undefined) {
+                                _totalP2PDownloaded = _totalP2PDownloaded + bytesLength;
+                                updateStats();
+                            }
+                        });
+                        
+                        // 当数据块成功上传到对等方时调用。
+                        hls.p2pEngine.addEventListener('onChunkUploaded', (bytesLength, peerId) => {
+                            _totalP2PUploaded = _totalP2PUploaded + bytesLength;
+                            updateStats();
+                        });
+                    }
+                },
+            });
+            
+            hls.loadSource(url);
+            hls.attachMedia(video);
+            
+        }
+    </script>
+    
+</body>
+</html>
