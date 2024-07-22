@@ -10,7 +10,7 @@ var __privateAdd = (obj, member, value) => member.has(obj) ? __typeError("Cannot
 var __privateSet = (obj, member, value, setter) => (__accessCheck(obj, member, "write to private field"), setter ? setter.call(obj, value) : member.set(obj, value), value);
 var __privateMethod = (obj, member, method) => (__accessCheck(obj, member, "access private method"), method);
 var _callbacks, _createDefaultLoader, _defaultLoader, _core, _response, _segmentId, _FragmentLoaderBase_instances, handleError_fn, abortInternal_fn, _defaultLoader2;
-import { CoreRequestError, debug, Core } from "p2p-media-loader-core";
+import { CoreRequestError, debug, Core } from "./p2p-media-loader-core";
 function getSegmentRuntimeId(segmentRequestUrl, byteRange) {
   if (!byteRange) return segmentRequestUrl;
   return `${segmentRequestUrl}|${byteRange.start}-${byteRange.end}`;
