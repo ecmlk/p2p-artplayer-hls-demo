@@ -4789,7 +4789,7 @@ exports.crypt = function(key, setting) {
 };
 var md5Exports = md5$1.exports;
 const md52 = /* @__PURE__ */ getDefaultExportFromCjs(md5Exports);
-const PACKAGE_VERSION = "1.0.3";
+const PACKAGE_VERSION = "1.0.4";
 const TRACKER_CLIENT_VERSION_PREFIX = `-PM${formatVersion(PACKAGE_VERSION)}-`;
 const HASH_SYMBOLS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 const PEER_ID_LENGTH = 20;
@@ -5334,6 +5334,7 @@ function serializeSegmentAnnouncementCommand(command, maxChunkSize) {
 function serializePeerSegmentCommand(command, maxChunkSize) {
   const creator = new BinaryCommandCreator(command.c, maxChunkSize);
   creator.addInteger("i", command.i);
+  creator.addInteger("r", command.r);
   creator.complete();
   return creator.getResultBuffers();
 }
@@ -5341,12 +5342,14 @@ function serializePeerSendSegmentCommand(command, maxChunkSize) {
   const creator = new BinaryCommandCreator(command.c, maxChunkSize);
   creator.addInteger("i", command.i);
   creator.addInteger("s", command.s);
+  creator.addInteger("r", command.r);
   creator.complete();
   return creator.getResultBuffers();
 }
 function serializePeerSegmentRequestCommand(command, maxChunkSize) {
   const creator = new BinaryCommandCreator(command.c, maxChunkSize);
   creator.addInteger("i", command.i);
+  creator.addInteger("r", command.r);
   if (command.b) creator.addInteger("b", command.b);
   creator.complete();
   return creator.getResultBuffers();
@@ -5385,7 +5388,7 @@ class PeerProtocol {
         this.receivingCommandBytes(data);
       } else {
         this.eventHandlers.onSegmentChunkReceived(data);
-        this.onChunkDownloaded(data.length, "p2p", this.connection.idUtf8);
+        this.onChunkDownloaded(data.byteLength, "p2p", this.connection.idUtf8);
       }
     });
     this.connection = connection;
@@ -5401,7 +5404,7 @@ class PeerProtocol {
       this.peerConfig.webRtcMaxMessageSize
     );
     for (const buffer of binaryCommandBuffers) {
-      this.connection.send(buffer);
+      this.connection.write(buffer);
     }
   }
   stopUploadingSegmentData() {
@@ -5409,7 +5412,11 @@ class PeerProtocol {
     (_a = this.uploadingContext) == null ? void 0 : _a.stopUploading();
     this.uploadingContext = void 0;
   }
-  async splitSegmentDataToChunksAndUploadAsync(data) {
+  getUploadingRequestId() {
+    var _a;
+    return (_a = this.uploadingContext) == null ? void 0 : _a.requestId;
+  }
+  async splitSegmentDataToChunksAndUploadAsync(data, requestId) {
     if (this.uploadingContext) {
       throw new Error(`Some segment data is already uploading.`);
     }
@@ -5419,7 +5426,8 @@ class PeerProtocol {
     const uploadingContext = {
       stopUploading: () => {
         isUploadingSegmentData = false;
-      }
+      },
+      requestId
     };
     this.uploadingContext = uploadingContext;
     const sendChunk = () => {
@@ -5480,7 +5488,7 @@ function* getBufferChunks(data, maxChunkSize) {
 }
 const { PeerCommandType } = Command;
 class Peer2 {
-  constructor(connection, eventHandlers, peerConfig, eventTarget) {
+  constructor(connection, eventHandlers, peerConfig, streamType, eventTarget) {
     __publicField(this, "id");
     __publicField(this, "peerProtocol");
     __publicField(this, "downloadingContext");
@@ -5490,7 +5498,7 @@ class Peer2 {
     __publicField(this, "logger", debug$3("p2pml-core:peer"));
     __publicField(this, "onPeerClosed");
     __publicField(this, "onCommandReceived", async (command) => {
-      var _a, _b, _c;
+      var _a, _b, _c, _d;
       switch (command.c) {
         case PeerCommandType.SegmentsAnnouncement:
           this.loadedSegments = new Set(command.l);
@@ -5499,21 +5507,28 @@ class Peer2 {
           break;
         case PeerCommandType.SegmentRequest:
           this.peerProtocol.stopUploadingSegmentData();
-          this.eventHandlers.onSegmentRequested(this, command.i, command.b);
+          this.eventHandlers.onSegmentRequested(
+            this,
+            command.i,
+            command.r,
+            command.b
+          );
           break;
         case PeerCommandType.SegmentData:
           {
             if (!this.downloadingContext) break;
             if (this.downloadingContext.isSegmentDataCommandReceived) break;
-            const { request, controls } = this.downloadingContext;
-            if (request.segment.externalId !== command.i) break;
+            const { request, controls, requestId } = this.downloadingContext;
+            if (request.segment.externalId !== command.i || requestId !== command.r) {
+              break;
+            }
             this.downloadingContext.isSegmentDataCommandReceived = true;
             controls.firstBytesReceived();
             if (request.totalBytes === void 0) {
               request.setTotalBytes(command.s);
             } else if (request.totalBytes - request.loadedBytes !== command.s) {
               request.clearLoadedBytes();
-              this.sendCancelSegmentRequestCommand(request.segment);
+              this.sendCancelSegmentRequestCommand(request.segment, requestId);
               this.cancelSegmentDownloading(
                 "peer-response-bytes-length-mismatch"
               );
@@ -5525,7 +5540,7 @@ class Peer2 {
           const downloadingContext = this.downloadingContext;
           if (!(downloadingContext == null ? void 0 : downloadingContext.isSegmentDataCommandReceived)) return;
           const { request, controls } = downloadingContext;
-          const isWrongSegment = downloadingContext.request.segment.externalId !== command.i;
+          const isWrongSegment = downloadingContext.request.segment.externalId !== command.i || downloadingContext.requestId !== command.r;
           if (isWrongSegment) {
             request.clearLoadedBytes();
             this.cancelSegmentDownloading("peer-protocol-violation");
@@ -5557,12 +5572,14 @@ class Peer2 {
           break;
         }
         case PeerCommandType.SegmentAbsent:
-          if (((_c = this.downloadingContext) == null ? void 0 : _c.request.segment.externalId) === command.i) {
+          if (((_c = this.downloadingContext) == null ? void 0 : _c.request.segment.externalId) === command.i && ((_d = this.downloadingContext) == null ? void 0 : _d.requestId) === command.r) {
             this.cancelSegmentDownloading("peer-segment-absent");
             this.loadedSegments.delete(command.i);
           }
           break;
         case PeerCommandType.CancelSegmentRequest:
+          const uploadingRequestId = this.peerProtocol.getUploadingRequestId();
+          if (uploadingRequestId !== command.r) break;
           this.peerProtocol.stopUploadingSegmentData();
           break;
       }
@@ -5585,10 +5602,13 @@ class Peer2 {
     });
     __publicField(this, "onConnectionError", (error) => {
       this.logger(`peer connection error ${this.id} %O`, error);
+      this.eventTarget.getEventDispatcher("onPeerError")({
+        peerId: this.id,
+        streamType: this.streamType,
+        error
+      });
       const code = error.code;
       if (code === "ERR_DATA_CHANNEL") {
-        this.destroy();
-      } else if (code === "ERR_CONNECTION_FAILURE") {
         this.destroy();
       } else if (code === "ERR_CONNECTION_FAILURE") {
         this.destroy();
@@ -5599,13 +5619,16 @@ class Peer2 {
       this.connection.destroy();
       this.eventHandlers.onPeerClosed(this);
       this.onPeerClosed({
-        peerId: this.id
+        peerId: this.id,
+        streamType: this.streamType
       });
       this.logger(`peer closed ${this.id}`);
     });
     this.connection = connection;
     this.eventHandlers = eventHandlers;
     this.peerConfig = peerConfig;
+    this.streamType = streamType;
+    this.eventTarget = eventTarget;
     this.onPeerClosed = eventTarget.getEventDispatcher("onPeerClose");
     this.id = Peer2.getPeerIdFromConnection(connection);
     this.peerProtocol = new PeerProtocol(
@@ -5619,7 +5642,8 @@ class Peer2 {
       eventTarget
     );
     eventTarget.getEventDispatcher("onPeerConnect")({
-      peerId: this.id
+      peerId: this.id,
+      streamType
     });
     connection.on("error", this.onConnectionError);
     connection.on("close", this.onPeerConnectionClosed);
@@ -5641,6 +5665,7 @@ class Peer2 {
     }
     this.downloadingContext = {
       request: segmentRequest,
+      requestId: Math.floor(Math.random() * 1e3),
       isSegmentDataCommandReceived: false,
       controls: segmentRequest.start(
         { downloadSource: "p2p", peerId: this.id },
@@ -5648,8 +5673,8 @@ class Peer2 {
           notReceivingBytesTimeoutMs: this.peerConfig.p2pNotReceivingBytesTimeoutMs,
           abort: (error) => {
             if (!this.downloadingContext) return;
-            const { request } = this.downloadingContext;
-            this.sendCancelSegmentRequestCommand(request.segment);
+            const { request, requestId } = this.downloadingContext;
+            this.sendCancelSegmentRequestCommand(request.segment, requestId);
             this.downloadingErrors.push(error);
             this.downloadingContext = void 0;
             const timeoutErrors = this.downloadingErrors.filter(
@@ -5664,25 +5689,28 @@ class Peer2 {
     };
     const command = {
       c: PeerCommandType.SegmentRequest,
+      r: this.downloadingContext.requestId,
       i: segmentRequest.segment.externalId
     };
     if (segmentRequest.loadedBytes) command.b = segmentRequest.loadedBytes;
     this.peerProtocol.sendCommand(command);
   }
-  async uploadSegmentData(segment, data) {
+  async uploadSegmentData(segment, requestId, data) {
     const { externalId } = segment;
     this.logger(`send segment ${segment.externalId} to ${this.id}`);
     const command = {
       c: PeerCommandType.SegmentData,
       i: externalId,
+      r: requestId,
       s: data.byteLength
     };
     this.peerProtocol.sendCommand(command);
     try {
       await this.peerProtocol.splitSegmentDataToChunksAndUploadAsync(
-        data
+        data,
+        requestId
       );
-      this.sendSegmentDataSendingCompletedCommand(segment);
+      this.sendSegmentDataSendingCompletedCommand(segment, requestId);
       this.logger(`segment ${externalId} has been sent to ${this.id}`);
     } catch (err) {
       this.logger(`cancel segment uploading ${externalId}`);
@@ -5706,27 +5734,33 @@ class Peer2 {
     };
     this.peerProtocol.sendCommand(command);
   }
-  sendSegmentAbsentCommand(segmentExternalId) {
+  sendSegmentAbsentCommand(segmentExternalId, requestId) {
     this.peerProtocol.sendCommand({
       c: PeerCommandType.SegmentAbsent,
-      i: segmentExternalId
+      i: segmentExternalId,
+      r: requestId
     });
   }
-  sendCancelSegmentRequestCommand(segment) {
+  sendCancelSegmentRequestCommand(segment, requestId) {
     this.peerProtocol.sendCommand({
       c: PeerCommandType.CancelSegmentRequest,
-      i: segment.externalId
+      i: segment.externalId,
+      r: requestId
     });
   }
-  sendSegmentDataSendingCompletedCommand(segment) {
+  sendSegmentDataSendingCompletedCommand(segment, requestId) {
     this.peerProtocol.sendCommand({
       c: PeerCommandType.SegmentDataSendingCompleted,
+      r: requestId,
       i: segment.externalId
     });
   }
   static getPeerIdFromConnection(connection) {
     return hexToUtf8(connection.id);
   }
+}
+function isSafariBrowser() {
+  return /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
 }
 class P2PTrackerClient {
   constructor(streamSwarmId, stream, eventHandlers, config, eventTarget) {
@@ -5760,6 +5794,7 @@ class P2PTrackerClient {
             onSegmentsAnnouncement: this.eventHandlers.onSegmentsAnnouncement
           },
           this.config,
+          this.stream.type,
           this.eventTarget
         );
         this.logger(
@@ -5770,14 +5805,23 @@ class P2PTrackerClient {
     });
     __publicField(this, "onTrackerClientWarning", (warning) => {
       this.logger(`tracker warning (${this.streamShortId}: ${warning})`);
+      this.eventTarget.getEventDispatcher("onTrackerWarning")({
+        streamType: this.stream.type,
+        warning
+      });
     });
     __publicField(this, "onTrackerClientError", (error) => {
       this.logger(`tracker error (${this.streamShortId}: ${error})`);
+      this.eventTarget.getEventDispatcher("onTrackerError")({
+        streamType: this.stream.type,
+        error
+      });
     });
     __publicField(this, "onPeerClosed", (peer) => {
       this.logger(`peer closed: ${peer.id}`);
       this._peers.delete(peer.id);
     });
+    this.stream = stream;
     this.eventHandlers = eventHandlers;
     this.config = config;
     this.eventTarget = eventTarget;
@@ -5787,7 +5831,7 @@ class P2PTrackerClient {
     this.client = new Client({
       infoHash: utf8ToUintArray(streamHash),
       peerId: utf8ToUintArray(peerId),
-      announce: this.config.announceTrackers,
+      announce: isSafariBrowser() ? config.announceTrackers.slice(0, 1) : config.announceTrackers,
       rtcConfig: this.config.rtcConfig
     });
     this.client.on("peer", this.onReceivePeerConnection);
@@ -5819,7 +5863,7 @@ peerId: ${peerId}`
     }
   }
 }
-const PEER_PROTOCOL_VERSION = "v1";
+const PEER_PROTOCOL_VERSION = "v2";
 function getStreamSwarmId(swarmId, stream) {
   return `${PEER_PROTOCOL_VERSION}-${swarmId}-${getStreamId(stream)}`;
 }
@@ -5900,7 +5944,7 @@ class P2PLoader {
         this.isAnnounceMicrotaskCreated = false;
       });
     });
-    __publicField(this, "onSegmentRequested", async (peer, segmentExternalId, byteFrom) => {
+    __publicField(this, "onSegmentRequested", async (peer, segmentExternalId, requestId, byteFrom) => {
       const segment = getSegmentFromStreamByExternalId(
         this.stream,
         segmentExternalId
@@ -5908,11 +5952,12 @@ class P2PLoader {
       if (!segment) return;
       const segmentData = await this.segmentStorage.getSegmentData(segment);
       if (!segmentData) {
-        peer.sendSegmentAbsentCommand(segmentExternalId);
+        peer.sendSegmentAbsentCommand(segmentExternalId, requestId);
         return;
       }
       await peer.uploadSegmentData(
         segment,
+        requestId,
         byteFrom !== void 0 ? segmentData.slice(byteFrom) : segmentData
       );
     });
@@ -6074,7 +6119,6 @@ class P2PLoadersContainer {
 }
 let Request$1 = class Request2 {
   constructor(segment, requestProcessQueueCallback, bandwidthCalculators, playback, playbackConfig, eventTarget) {
-    __publicField(this, "id");
     __publicField(this, "currentAttempt");
     __publicField(this, "_failedAttempts", new FailedRequestAttempts());
     __publicField(this, "finalData");
@@ -6109,7 +6153,8 @@ let Request$1 = class Request2 {
         segment: this.segment,
         error,
         downloadSource: this.currentAttempt.downloadSource,
-        peerId: this.currentAttempt.downloadSource === "p2p" ? this.currentAttempt.peerId : void 0
+        peerId: this.currentAttempt.downloadSource === "p2p" ? this.currentAttempt.peerId : void 0,
+        streamType: this.segment.stream.type
       });
       this.notReceivingBytesTimeout.clear();
       this.manageBandwidthCalculatorsState("stop");
@@ -6130,7 +6175,8 @@ let Request$1 = class Request2 {
         segment: this.segment,
         error,
         downloadSource: this.currentAttempt.downloadSource,
-        peerId: this.currentAttempt.downloadSource === "p2p" ? this.currentAttempt.peerId : void 0
+        peerId: this.currentAttempt.downloadSource === "p2p" ? this.currentAttempt.peerId : void 0,
+        streamType: this.segment.stream.type
       });
       this.notReceivingBytesTimeout.clear();
       this.manageBandwidthCalculatorsState("stop");
@@ -6145,9 +6191,11 @@ let Request$1 = class Request2 {
       this.setStatus("succeed");
       this._totalBytes = this._loadedBytes;
       this.onSegmentLoaded({
+        segmentUrl: this.segment.url,
         bytesLength: this.finalData.byteLength,
         downloadSource: this.currentAttempt.downloadSource,
-        peerId: this.currentAttempt.downloadSource === "p2p" ? this.currentAttempt.peerId : void 0
+        peerId: this.currentAttempt.downloadSource === "p2p" ? this.currentAttempt.peerId : void 0,
+        streamType: this.segment.stream.type
       });
       this.logger(
         `${this.currentAttempt.downloadSource} ${this.segment.externalId} succeed`
@@ -6182,7 +6230,6 @@ let Request$1 = class Request2 {
     this.onSegmentAbort = eventTarget.getEventDispatcher("onSegmentAbort");
     this.onSegmentStart = eventTarget.getEventDispatcher("onSegmentStart");
     this.onSegmentLoaded = eventTarget.getEventDispatcher("onSegmentLoaded");
-    this.id = this.segment.runtimeId;
     const { byteRange } = this.segment;
     if (byteRange) {
       const { end, start } = byteRange;
@@ -6284,7 +6331,8 @@ let Request$1 = class Request2 {
     this.onSegmentAbort({
       segment: this.segment,
       downloadSource: (_c = this.currentAttempt) == null ? void 0 : _c.downloadSource,
-      peerId: ((_d = this.currentAttempt) == null ? void 0 : _d.downloadSource) === "p2p" ? this.currentAttempt.peerId : void 0
+      peerId: ((_d = this.currentAttempt) == null ? void 0 : _d.downloadSource) === "p2p" ? this.currentAttempt.peerId : void 0,
+      streamType: this.segment.stream.type
     });
     this._abortRequestCallback = void 0;
     this.manageBandwidthCalculatorsState("stop");
@@ -7484,15 +7532,15 @@ __publicField(_Core, "DEFAULT_COMMON_CORE_CONFIG", {
 /** Default configuration for stream settings. */
 __publicField(_Core, "DEFAULT_STREAM_CONFIG", {
   isP2PDisabled: false,
-  simultaneousHttpDownloads: 3,
+  simultaneousHttpDownloads: 2,
   simultaneousP2PDownloads: 3,
   highDemandTimeWindow: 15,
   httpDownloadTimeWindow: 3e3,
   p2pDownloadTimeWindow: 6e3,
   webRtcMaxMessageSize: 64 * 1024 - 1,
-  p2pNotReceivingBytesTimeoutMs: 1e3,
+  p2pNotReceivingBytesTimeoutMs: 2e3,
   p2pInactiveLoaderDestroyTimeoutMs: 30 * 1e3,
-  httpNotReceivingBytesTimeoutMs: 1e3,
+  httpNotReceivingBytesTimeoutMs: 3e3,
   httpErrorRetries: 3,
   p2pErrorRetries: 3,
   trackerClientVersionPrefix: TRACKER_CLIENT_VERSION_PREFIX,
